@@ -22,6 +22,9 @@ def _tex(value):
                     ('~', r'\textasciitilde{}'), ('^', r'\^{}')]:
         s = s.replace(ch, esc)
     s = s.replace(':', r':\allowbreak{}')
+    # Comparison glyphs from the design engine messages (inserted after escaping
+    # so the math delimiters survive).
+    s = s.replace('≤', r'$\leq$').replace('≥', r'$\geq$')
     return s
 
 

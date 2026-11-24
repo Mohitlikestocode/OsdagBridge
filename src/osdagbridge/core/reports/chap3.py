@@ -5,6 +5,7 @@
 
 from osdagbridge.core.utils.common import (
     KEY_CB_LOAD,
+    KEY_FOOTPATH,
     KEY_LL_CUSTOM_VEHICLES,
     KEY_LL_FOOTPATH_PRESSURE_MODE,
     KEY_LL_FOOTPATH_PRESSURE_VALUE,
@@ -55,92 +56,139 @@ from osdagbridge.core.utils.common import (
 
 from osdagbridge.core.reports.report_utils import _tex, _render_value
 
-def ch3_loads(input_dict):
-    # Live load vehicle names mapping
-    vehicles = []
-    if input_dict.get(KEY_LL_IRC_CLASS_A):
-        vehicles.append("Class A")
-    if input_dict.get(KEY_LL_IRC_70R_WHEELED):
-        vehicles.append("Class 70R (Wheeled)")
-    if input_dict.get(KEY_LL_IRC_70R_TRACKED):
-        vehicles.append("Class 70R (Tracked)")
-    if input_dict.get(KEY_LL_IRC_AA_WHEELED):
-        vehicles.append("Class AA (Wheeled)")
-    if input_dict.get(KEY_LL_IRC_AA_TRACKED):
-        vehicles.append("Class AA (Tracked)")
-    if input_dict.get(KEY_LL_IRC_CLASS_SV):
-        vehicles.append("Class SV")
-    if input_dict.get(KEY_LL_IRC_70R_BOGIE):
-        vehicles.append("Class 70R (Bogie)")
-    if input_dict.get(KEY_LL_IRC_CLASS_FATIGUE):
-        vehicles.append("Class Fatigue")
-    
+# ── Live load tables (Chapter 3) ─────────────────────────────────────────────
+# (UI key, display name, impact-factor family). Family "A" uses IRC 6 Cl. 208.2,
+# "heavy" uses Cl. 208.3, None means no impact rule is applied here.
+_LL_VEHICLES = [
+    (KEY_LL_IRC_CLASS_A,        "Class A",              "A"),
+    (KEY_LL_IRC_70R_WHEELED,    "Class 70R (Wheeled)",  "heavy"),
+    (KEY_LL_IRC_70R_TRACKED,    "Class 70R (Tracked)",  "heavy"),
+    (KEY_LL_IRC_AA_WHEELED,     "Class AA (Wheeled)",   "heavy"),
+    (KEY_LL_IRC_AA_TRACKED,     "Class AA (Tracked)",   "heavy"),
+    (KEY_LL_IRC_CLASS_SV,       "Class SV",             None),
+    (KEY_LL_IRC_70R_BOGIE,      "Class 70R (Bogie)",    "heavy"),
+    (KEY_LL_IRC_CLASS_FATIGUE,  "Class Fatigue",        None),
+]
+
+_LL_IMPACT_REF = {"A": "Cl. 208.2", "heavy": "Cl. 208.3"}
+
+
+def _selected_vehicles(input_dict):
+    """Vehicles ticked in the Loading > Live Load tab, as [(name, family)]."""
+    chosen = [(name, fam) for key, name, fam in _LL_VEHICLES if input_dict.get(key)]
     custom = input_dict.get(KEY_LL_CUSTOM_VEHICLES)
     if custom and isinstance(custom, list):
         for c in custom:
-            if isinstance(c, dict) and c.get('name'):
-                vehicles.append(c['name'])
-            elif isinstance(c, str):
-                vehicles.append(c)
-                
-    vehicles_str = ", ".join(vehicles) if vehicles else "None"
+            name = c.get("name") if isinstance(c, dict) else c
+            if name:
+                chosen.append((str(name), None))
+    return chosen
 
-    from osdagbridge.core.utils.codes.irc6_2017 import IRC6_2017
+
+def _ll_table(caption, colspec, header, rows, note=""):
+    """One live-load longtable. ``header`` is a list of column titles and
+    ``rows`` a list of lists of ready-to-embed LaTeX cells."""
+    na_row = r"\\[6pt]" + "\n" + r"\hline"
+    head = " & ".join(r"\textbf{%s}" % h for h in header) + r" \\[6pt]"
+    body = "\n".join(" & ".join(r) + " " + na_row for r in rows)
+    out = (
+        "\\vspace{1em}\n"
+        "\\begin{longtable}{" + colspec + "}\n"
+        "\\caption{\\textbf{" + caption + "}}\n"
+        "\\hline\n" + head + "\n\\hline\n" + body + "\n"
+        "\\end{longtable}\n"
+    )
+    if note:
+        out += "\\noindent\\textit{" + note + "}\n"
+    return out
+
+
+def _live_load_tables(input_dict, irc6):
+    """Three separate tables: vehicle live loads, carriageway effects (braking
+    and centrifugal) and footway live load. Each row carries its own unit."""
+    na = "---"
     span = input_dict.get(KEY_SPAN)
-    impact_factor_str = ""
-    if span not in (None, ""):
+
+    def impact(family):
+        if family is None or span in (None, ""):
+            return na
         try:
             span_m = float(span)
-            factors = []
-            if input_dict.get(KEY_LL_IRC_CLASS_A):
-                im_a = IRC6_2017.cl_208_2_impact_factor(span_m)
-                factors.append(f"Class A: {1.0 + im_a:.3f}")
-            is_wheeled_heavy = (
-                input_dict.get(KEY_LL_IRC_70R_WHEELED) or 
-                input_dict.get(KEY_LL_IRC_AA_WHEELED) or 
-                input_dict.get(KEY_LL_IRC_70R_BOGIE)
-            )
-            is_tracked_heavy = (
-                input_dict.get(KEY_LL_IRC_70R_TRACKED) or 
-                input_dict.get(KEY_LL_IRC_AA_TRACKED)
-            )
-            if is_wheeled_heavy or is_tracked_heavy:
-                im_aa = IRC6_2017.cl_208_3_impact_factor(span_m)
-                factors.append(f"Class AA/70R: {1.0 + im_aa:.3f}")
-            
-            if factors:
-                impact_factor_str = ", ".join(factors)
-            else:
-                impact_factor_str = "N/A"
+            im = (irc6.cl_208_2_impact_factor(span_m) if family == "A"
+                  else irc6.cl_208_3_impact_factor(span_m))
+            return "%.3f" % (1.0 + im)
         except Exception:
-            impact_factor_str = "N/A"
-    else:
-        impact_factor_str = "N/A"
+            return na
 
+    # (a) Vehicle live loads: only the vehicles selected in the UI
+    vehicles = _selected_vehicles(input_dict)
+    if vehicles:
+        v_rows = [[_tex(name), impact(fam), _LL_IMPACT_REF.get(fam, na)] for name, fam in vehicles]
+    else:
+        v_rows = [[r"\multicolumn{3}{|c|}{No vehicle selected in the Live Load tab}"]]
+    span_s = _tex(span) if span not in (None, "") else "N/A"
+    vehicle_table = _ll_table(
+        "Live Load --- Vehicles Considered",
+        r"|L{6.0cm}|C{4.5cm}|C{4.0cm}|",
+        ["Vehicle Class", "Impact Factor, $1+IM$ (--)", "IRC 6 Reference"],
+        v_rows,
+        "Impact factor is evaluated for a span of %s m. A dash means no impact rule "
+        "is applied to that vehicle." % span_s)
+
+    # (b) Carriageway effects: braking and centrifugal force
     lanes = input_dict.get(KEY_WC_LD_LANE_TABLE_COUNT)
-    braking_force_str = ""
+    brake_kn = brake_t = na
     if lanes not in (None, ""):
         try:
-            lanes_int = int(lanes)
-            braking_force_t = IRC6_2017.cl_211_2_braking_force(lanes_int)
-            braking_force_kN = braking_force_t * 9.81
-            braking_force_str = f"{braking_force_kN:.2f} kN ({braking_force_t:.2f} tonnes)"
+            t = irc6.cl_211_2_braking_force(int(lanes))
+            brake_t, brake_kn = "%.2f" % t, "%.2f" % (t * 9.81)
         except Exception:
-            braking_force_str = "N/A"
-    else:
-        braking_force_str = "N/A"
+            pass
+    lanes_s = _tex(lanes) if lanes not in (None, "") else na
+    effects_table = _ll_table(
+        "Live Load --- Braking and Centrifugal Effects",
+        r"|L{5.5cm}|C{3.0cm}|C{2.0cm}|L{4.0cm}|",
+        ["Parameter", "Value", "Unit", "IRC 6 Reference"],
+        [
+            ["Design lanes considered", lanes_s, "--", "Cl. 211.2"],
+            ["Braking force", brake_kn, "kN", "Cl. 211.2"],
+            ["Braking force", brake_t, "tonnes", "Cl. 211.2"],
+            ["Braking force application height", "1.2", "m", "Cl. 211.3"],
+            ["Centrifugal force", "N/A", "kN", "Cl. 212"],
+        ],
+        "Centrifugal force applies to curved bridges. OsdagBridge has no curvature "
+        "input, so it is reported as not applicable.")
 
-    fp_mode  = input_dict.get(KEY_LL_FOOTPATH_PRESSURE_MODE, "")
+    # (c) Footway live load
+    footpath_opt = str(input_dict.get(KEY_FOOTPATH, "None")).strip()
+    has_fp = footpath_opt not in ("", "None")
+    fp_mode = str(input_dict.get(KEY_LL_FOOTPATH_PRESSURE_MODE, "")).strip().lower()
     fp_value = input_dict.get(KEY_LL_FOOTPATH_PRESSURE_VALUE, "")
-    if str(fp_mode).strip().lower() in ("as per irc 6", "as per irc6", "automatic"):
-        try:
-            fp_str = f"{IRC6_2017.cl_206_1_footway_load():.3f} kN/m² (IRC 6 Cl. 206.1)"
-        except Exception:
-            fp_str = "N/A"
-    elif fp_value not in (None, ""):
-        fp_str = f"{fp_value} kN/m²"
-    else:
-        fp_str = "N/A"
+    pressure, pref = "N/A", "Not applicable"
+    if has_fp:
+        pressure, pref = na, na
+        if fp_mode in ("as per irc 6", "as per irc6", "automatic"):
+            try:
+                pressure, pref = "%.3f" % irc6.cl_206_1_footway_load(), "Cl. 206.1"
+            except Exception:
+                pass
+        elif fp_value not in (None, ""):
+            pressure, pref = _tex(fp_value), "User defined"
+    footway_table = _ll_table(
+        "Live Load --- Footway",
+        r"|L{5.5cm}|C{3.0cm}|C{2.0cm}|L{4.0cm}|",
+        ["Parameter", "Value", "Unit", "IRC 6 Reference"],
+        [
+            ["Footway provided", _tex(footpath_opt) if has_fp else "No", "--", "--"],
+            ["Footway live load pressure", pressure, r"kN/m\textsuperscript{2}", pref],
+        ])
+
+    return vehicle_table + effects_table + footway_table
+
+
+def ch3_loads(input_dict):
+    from osdagbridge.core.utils.codes.irc6_2017 import IRC6_2017
+    live_load_tex = _live_load_tables(input_dict, IRC6_2017)
 
     # Vz / Pz — prefer stored computed values; fall back to IRC6 Table 12
     vz_val = input_dict.get(KEY_WL_HOURLY_MEAN_WIND)
@@ -299,21 +347,7 @@ This section summarizes all loads applied to the bridge and the load combination
 \hline
 \end{longtable}
 
-\vspace{1em}
-\begin{longtable}{|L{5.5cm}|p{10.0cm}|}
-\caption{\textbf{Live Loads (LL)}}
-\hline
-\textbf{parameter} & \textbf{value} \\
-\hline
-\textnormal{Vehicles Considered} & """ + _tex(vehicles_str) + r""" \\[6pt]
-\hline
-\textnormal{Impact Factor (IRC 6)} & """ + _tex(impact_factor_str) + r""" \\[6pt]
-\hline
-\textnormal{Braking Load (IRC 6)} & """ + _tex(braking_force_str) + r""" \\[6pt]
-\hline
-\textnormal{Footpath Live Load (if applicable)} & """ + (_render_value(input_dict, KEY_LL_FOOTPATH_PRESSURE_VALUE, ' kN/m\\textsuperscript{2}')) + r""" \\[6pt]
-\hline
-\end{longtable}
+""" + live_load_tex + r"""
 
 \vspace{1em}
 \begin{longtable}{|L{5.5cm}|p{10.0cm}|}

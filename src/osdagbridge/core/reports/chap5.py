@@ -4,6 +4,11 @@
 # =============================================================================
 from __future__ import annotations
 from typing import TYPE_CHECKING
+import logging
+
+from osdagbridge.core.reports.charts import figure_tex, group_for_label, make_ur_charts, parse_ur
+
+logger = logging.getLogger(__name__)
 
 from osdagbridge.core.utils.common import (
     KEY_DD_AS_BOT,
@@ -145,7 +150,7 @@ from osdagbridge.core.reports.report_utils import _tex, _render_value, get_girde
 
 if TYPE_CHECKING:
     pass
-def ch5_design_checks(checks_data, bridge) -> str:
+def ch5_design_checks(checks_data, bridge, asset_dir=None) -> str:
     """Chapter 5 — Design Checks.
 
     Parameters
@@ -975,8 +980,12 @@ Fatigue Shear Resistance, $Q_r$ & IRC 22 Table 8 ($\phi d$, $N_{sc}$) & """
         ratio, sf, lim = best
         return ("---", f"{sf:.1f}", f"{lim:.0f}", _ur_522(ratio))
 
+    # Numeric UR per row, collected for the Section 5.5 charts.
+    _ur_records = []
+
     def _row522(label, cells):
         c = [x if x else "---" for x in cells]
+        _ur_records.append((group_for_label(label), label, parse_ur(c[3]) if len(c) > 3 else None))
         return label + r" & " + r" & ".join(c) + r" \\[6pt]" + "\n\\hline"
 
     # Deck rows: Demand/Capacity from deck_report_values (KEY_DD_*, the same dict
@@ -1064,6 +1073,30 @@ Fatigue Shear Resistance, $Q_r$ & IRC 22 Table 8 ($\phi d$, $N_{sc}$) & """
         _ed_shear_row,
     ]
     t522_content = "\n".join(_t522)
+
+    # Section 5.5 charts: UR per check and governing UR per element.
+    ur_charts_tex = ""
+    if asset_dir:
+        try:
+            _ur_imgs = make_ur_charts(_ur_records, asset_dir)
+        except Exception as exc:  # a chart problem must never break the report
+            _ur_imgs = {}
+            logger.warning("UR charts skipped: %s", exc)
+        if _ur_imgs:
+            ur_charts_tex = (
+                "\n\\vspace{1em}\n\\noindent\\textbf{Utilization Ratio Charts}\n\n"
+                "\\noindent The charts below plot the Utilization Ratio (UR = Demand / Capacity) "
+                "from Table~\\ref{tab:overall-summary-ur}. The dashed red line marks UR = 1.0: "
+                "bars at or below it pass, bars above it fail.\n\n"
+            )
+            if "ur_governing" in _ur_imgs:
+                ur_charts_tex += figure_tex(
+                    _ur_imgs["ur_governing"],
+                    "Governing utilization ratio for each primary element", "fig:ur-governing")
+            if "ur_checks" in _ur_imgs:
+                ur_charts_tex += figure_tex(
+                    _ur_imgs["ur_checks"],
+                    "Utilization ratio of every design check, grouped by element", "fig:ur-checks")
 
     return r"""
 \chapter{Design Checks}
@@ -1493,13 +1526,12 @@ End diaphragms at the supports transfer transverse loads to the bearings, restra
 
 \vspace{1em}
 \begin{longtable}{|C{3.4cm}|L{4.5cm}|C{2.3cm}|C{2.3cm}|>{\centering\arraybackslash}p{1.6cm}|}
-\caption{\textbf{Overall Design Check Summary --- All Members}}
+\caption{\textbf{Overall Design Check Summary --- All Members}}\label{tab:overall-summary-ur}
 \hline
 \textbf{Member / Check} & \textbf{Governing Load Combo} & \textbf{Demand} & \textbf{Capacity} & \textbf{UR} \\[6pt]
 \hline
 """ + t522_content + r"""
 \end{longtable}
 \noindent\textit{Note: UR = Demand / Capacity. All values $\leq 1.0$ indicate passing checks. The governing check for each component is highlighted in the individual design check sections above.}
-
-"""
+""" + ur_charts_tex
 
